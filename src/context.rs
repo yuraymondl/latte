@@ -25,8 +25,10 @@ use rune::{Any, Value};
 use rust_embed::RustEmbed;
 use scylla::frame::response::result::CqlValue;
 use scylla::prepared_statement::PreparedStatement;
+use scylla::statement::Consistency;
 use scylla::transport::errors::{DbError, NewSessionError, QueryError};
 use scylla::transport::session::PoolSize;
+use scylla::transport::load_balancing::{DcAwareRoundRobinPolicy, TokenAwarePolicy};
 use scylla::{QueryResult, SessionBuilder};
 use statrs::distribution::Normal;
 use tokio::time::{Duration, Instant};
@@ -56,8 +58,12 @@ fn ssl_context(conf: &&ConnectionConf) -> Result<Option<SslContext>, CassError> 
 
 /// Configures connection to Cassandra.
 pub async fn connect(conf: &ConnectionConf) -> Result<scylla::Session, CassError> {
+    let local_dc: String = "las1".to_string();
+    let dc_robin = Box::new(DcAwareRoundRobinPolicy::new(local_dc));
+    let policy = Arc::new(TokenAwarePolicy::new(dc_robin));
     SessionBuilder::new()
         .known_nodes(&conf.addresses)
+        .load_balancing(policy)
         .pool_size(PoolSize::PerShard(conf.count))
         .user(&conf.user, &conf.password)
         .ssl_context(ssl_context(&conf)?)
@@ -308,11 +314,12 @@ impl Context {
 
     /// Prepares a statement and stores it in an internal statement map for future use.
     pub async fn prepare(&mut self, key: &str, cql: &str) -> Result<(), CassError> {
-        let statement = self
+        let mut statement = self
             .session
             .prepare(cql)
             .await
             .map_err(|e| CassError::prepare_error(cql, e))?;
+        statement.set_consistency(Consistency::LocalQuorum);
         self.statements.insert(key.to_string(), Arc::new(statement));
         Ok(())
     }
